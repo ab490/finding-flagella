@@ -1,0 +1,7 @@
+numpy==2.1.1
+pandas==2.2.3
+PyYAML==6.0.2
+tqdm==4.67.1
+ultralytics==8.3.97
+ultralytics-thop==2.0.14
+kaggle==1.7.4.2
