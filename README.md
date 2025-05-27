@@ -1,4 +1,4 @@
-# CV Final Project 
+# Detection of Bacterial Flagellar Motors in Tomograms
 
 ## Table of Contents
 - [Abstract](#abstract)
