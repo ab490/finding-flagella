@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import logging
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw
@@ -10,20 +13,33 @@ from pathlib import Path
 from ultralytics import YOLO
 import argparse
 
+logger = logging.getLogger(__name__)
 
-def normalize_data(slices):
+# Cryo-ET slices exhibit heavy intensity tails from missing-wedge reconstruction
+# artifacts. Clipping at the 2nd and 98th percentile removes those outliers while
+# preserving the biologically relevant contrast in the central 96% of the histogram.
+BOX_SIZE_PX = 24  # approximate motor diameter in pixels at 512×512 training resolution
+
+
+def normalize_data(slices: np.ndarray) -> np.ndarray:
     '''
     Removes the pixel values with extreme intensities
     Clipped within 2nd and 98th percentile
     Then rescales the intensities to [0,255]
     '''
     p2, p98 = np.percentile(slices, [2, 98])
+    if p98 == p2:
+        return np.zeros_like(slices, dtype=np.uint8)
     clipped_slices = np.clip(slices, p2, p98)
     normalized_slices = 255 * (clipped_slices - p2) / (p98 - p2)
     return np.uint8(normalized_slices)
 
 
-def split_train_val_test(labels_df, train_ratio=0.7, val_ratio=0.15):
+def split_train_val_test(
+        labels_df: pd.DataFrame,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.15,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     '''
     Splits dataset into training, validation, and test sets in 70:15:15
     Keeps only those tomograms from the dataset where at least one flagellar motor exists
@@ -39,15 +55,19 @@ def split_train_val_test(labels_df, train_ratio=0.7, val_ratio=0.15):
     return unique_tomos[:train_end], unique_tomos[train_end:val_end], unique_tomos[val_end:]
 
 
-def get_motor_coordinates(labels_df, tomogram_ids):
+def get_motor_coordinates(
+        labels_df: pd.DataFrame,
+        tomogram_ids: np.ndarray,
+) -> list[tuple[str, int, int, int, int]]:
     '''
     Returns coordinates of the flagellar motor and the depth of the tomogram (z-axis length)
+    Each entry is (tomo_id, axis_0, axis_1, axis_2, z_depth).
     '''
-    motor_coords = []
+    motor_coords: list[tuple[str, int, int, int, int]] = []
     for tomo_id in tomogram_ids:
         tomo_motors = labels_df[labels_df['tomo_id'] == tomo_id]
         for _, motor in tomo_motors.iterrows():
-            if pd.isna(motor['Motor axis 0']):
+            if any(pd.isna(motor[f'Motor axis {i}']) for i in range(3)):
                 continue
             motor_coords.append((
                 tomo_id,
@@ -60,31 +80,34 @@ def get_motor_coordinates(labels_df, tomogram_ids):
 
 
 def process_data(
-        motor_coords,
-        images_dir,
-        labels_dir,
-        set_name,
-        slice_margin,
-        train_dir):
+        motor_coords: list[tuple[str, int, int, int, int]],
+        images_dir: Path,
+        labels_dir: Path,
+        set_name: str,
+        slice_margin: int,
+        train_dir: Path,
+) -> tuple[int, int]:
     '''
     Normalizes images and adds bounding box around detected flagellar motors
     Creates label files required for YOLO compatible dataset
+    Returns (processed_slices, num_motors).
     '''
-    print(
-        f"Number of slices to be processed for {set_name} is {len(motor_coords) * (2 * slice_margin + 1)}")
+    logger.info(
+        "Number of slices to be processed for %s is %d",
+        set_name, len(motor_coords) * (2 * slice_margin + 1))
     processed_slices = 0
 
     for tomo_id, z_coord, y_coord, x_coord, z_max in tqdm(
             motor_coords, desc=f"Processing {set_name} motors"):
         z_min = max(0, z_coord - slice_margin)
-        z_max = min(z_max - 1, z_coord + slice_margin)
+        z_upper = min(z_max - 1, z_coord + slice_margin)
 
-        for z in range(z_min, z_max + 1):
+        for z in range(z_min, z_upper + 1):
             slice_filename = f"slice_{z:04d}.jpg"
             src_path = train_dir / tomo_id / slice_filename
 
             if not src_path.exists():
-                print(f"Warning: Skipping because {src_path} does not exist")
+                logger.warning("Skipping because %s does not exist", src_path)
                 continue
 
             img = Image.open(src_path)
@@ -98,9 +121,8 @@ def process_data(
             img_width, img_height = img.size
             x_coord_norm = x_coord / img_width
             y_coord_norm = y_coord / img_height
-            # using box size as 24
-            box_width_norm = 24 / img_width
-            box_height_norm = 24 / img_height
+            box_width_norm = BOX_SIZE_PX / img_width
+            box_height_norm = BOX_SIZE_PX / img_height
 
             label_path = labels_dir / dest_filename.replace('.jpg', '.txt')
             with open(label_path, 'w') as f:
@@ -112,7 +134,7 @@ def process_data(
     return processed_slices, len(motor_coords)
 
 
-def create_yaml_file(yolo_dataset_dir):
+def create_yaml_file(yolo_dataset_dir: Path) -> Path:
     '''
     Generates YOLO-compatible dataset configuration file
     '''
@@ -128,17 +150,30 @@ def create_yaml_file(yolo_dataset_dir):
     return yolo_dataset_dir / 'dataset.yaml'
 
 
-def create_yolo_data(train_dir, yolo_dataset_dir, labels_file, slice_margin):
+def create_yolo_data(
+        train_dir: Path,
+        yolo_dataset_dir: Path,
+        labels_file: Path,
+        slice_margin: int,
+) -> dict:
     '''
     Prepares and processes the dataset into YOLO format with train, val, and test splits, and returns metadata
     '''
+    yolo_images_train = yolo_dataset_dir / "images" / "train"
+    yolo_images_val = yolo_dataset_dir / "images" / "val"
+    yolo_images_test = yolo_dataset_dir / "images" / "test"
+    yolo_labels_train = yolo_dataset_dir / "labels" / "train"
+    yolo_labels_val = yolo_dataset_dir / "labels" / "val"
+    yolo_labels_test = yolo_dataset_dir / "labels" / "test"
+
     labels_df = pd.read_csv(labels_file)
     motors_all = labels_df['Number of motors'].sum()
-    print(f"Total number of motors present: {motors_all}")
+    logger.info("Total number of motors present: %d", motors_all)
 
     train_set, val_set, test_set = split_train_val_test(labels_df)
-    print(
-        f"Dataset split to {len(train_set)} train, {len(val_set)} val, {len(test_set)} test tomograms")
+    logger.info(
+        "Dataset split to %d train, %d val, %d test tomograms",
+        len(train_set), len(val_set), len(test_set))
 
     train_motor_coords = get_motor_coordinates(labels_df, train_set)
     val_motor_coords = get_motor_coordinates(labels_df, val_set)
@@ -169,7 +204,7 @@ def create_yolo_data(train_dir, yolo_dataset_dir, labels_file, slice_margin):
     }
 
 
-def save_dataset_info(yolo_data, output_path):
+def save_dataset_info(yolo_data: dict, output_path: Path) -> None:
     '''
     Saves dataset information for later use in evaluation
     '''
@@ -184,17 +219,22 @@ def save_dataset_info(yolo_data, output_path):
     with open(output_path, 'w') as f:
         json.dump(eval_data, f, indent=2)
 
-    print(f"Dataset info saved to {output_path}")
+    logger.info("Dataset info saved to %s", output_path)
 
 
-def visualize_slices(results_vis_dir, num_slices):
+def visualize_slices(
+        results_vis_dir: Path,
+        num_slices: int,
+        images_dir: Path,
+        labels_dir: Path,
+) -> None:
     '''
     Visualizes flagellar motor in random training images
     '''
-    image_files = list(yolo_images_train.rglob("*.jpg"))
+    image_files = list(images_dir.rglob("*.jpg"))
 
     if not image_files:
-        print("Warning: No training images found for visualization.")
+        logger.warning("No training images found for visualization.")
         return
 
     selected_images = random.sample(
@@ -206,7 +246,7 @@ def visualize_slices(results_vis_dir, num_slices):
     axes = np.array(axes).flatten()
 
     for i, img_path in enumerate(selected_images):
-        label_path = yolo_labels_train / (img_path.stem + ".txt")
+        label_path = labels_dir / (img_path.stem + ".txt")
         img = Image.open(img_path)
         img_width, img_height = img.size
 
@@ -256,17 +296,18 @@ def visualize_slices(results_vis_dir, num_slices):
         results_vis_dir /
         f"{num_slices}_sample_annotations.png",
         dpi=300)
-    print(f"Saved visualization to: {results_vis_dir}")
+    logger.info("Saved visualization to: %s", results_vis_dir)
     plt.close()
 
 
 def train_yolo(
-        yaml_path,
-        epochs,
-        batch_size,
-        img_size,
-        model_name,
-        results_dir):
+        yaml_path: Path,
+        epochs: int,
+        batch_size: int,
+        img_size: int,
+        model_name: str,
+        results_dir: Path,
+) -> tuple[YOLO, object]:
     model = YOLO(model_name)
     results = model.train(
         data=yaml_path,
@@ -284,9 +325,16 @@ def train_yolo(
     return model, results
 
 
-def plot_loss_curve(results_dir):
+def plot_loss_curve(results_dir: Path) -> None:
     results_csv = results_dir / "yolo_train" / "results.csv"
+    if not results_csv.exists():
+        logger.warning("results.csv not found, skipping loss curve: %s", results_csv)
+        return
     df = pd.read_csv(results_csv)
+    missing = [c for c in ("train/box_loss", "val/box_loss", "epoch") if c not in df.columns]
+    if missing:
+        logger.warning("Columns missing from results.csv, skipping loss curve: %s", missing)
+        return
 
     train_loss = df["train/box_loss"]
     val_loss = df["val/box_loss"]
@@ -301,29 +349,32 @@ def plot_loss_curve(results_dir):
     plt.title("Training and Validation Loss")
     plt.savefig(results_dir / "loss_curve.png")
     plt.close()
-    print("Loss curve saved at:", results_dir / "loss_curve.png")
+    logger.info("Loss curve saved at: %s", results_dir / "loss_curve.png")
 
 
 def train_pipeline(
-        epochs,
-        batch_size,
-        img_size,
-        model_name,
-        yolo_dataset_dir,
-        results_dir):
+        epochs: int,
+        batch_size: int,
+        img_size: int,
+        model_name: str,
+        yolo_dataset_dir: Path,
+        results_dir: Path,
+) -> None:
     '''
     Trains the model using training data
     Uses validation data for model selection
     '''
     yaml_path = yolo_dataset_dir / "dataset.yaml"
 
-    print("Starting model training...")
+    logger.info("Starting model training...")
     model, results = train_yolo(
         yaml_path, epochs, batch_size, img_size, model_name, results_dir)
     plot_loss_curve(results_dir)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
     np.random.seed(42)
     random.seed(42)
 
@@ -331,16 +382,25 @@ if __name__ == "__main__":
     BATCH_SIZE = 16
     IMG_SIZE = 512
 
+    project_root = Path(__file__).parent.parent
+
     parser = argparse.ArgumentParser()
     parser.add_argument("model_name", type=str)
+    parser.add_argument("--data-dir", type=Path, required=True,
+                        help="Directory containing train/ and train_labels.csv")
     args = parser.parse_args()
 
-    # change the username in base_data_path to yours
-    base_data_path = Path("/N/scratch/anobajaj/data")
-    train_dir = base_data_path / "train"
-    labels_file = base_data_path / "train_labels.csv"
+    train_dir = args.data_dir / "train"
+    labels_file = args.data_dir / "train_labels.csv"
 
-    yolo_dataset_dir = Path("../datasets/yolo_data")
+    if not args.data_dir.is_dir():
+        parser.error(f"--data-dir does not exist: {args.data_dir}")
+    if not train_dir.exists():
+        parser.error(f"--data-dir must contain a 'train/' subdirectory: {train_dir}")
+    if not labels_file.exists():
+        parser.error(f"--data-dir must contain 'train_labels.csv': {labels_file}")
+
+    yolo_dataset_dir = project_root / "datasets" / "yolo_data"
     yolo_images_train = yolo_dataset_dir / "images" / "train"
     yolo_images_val = yolo_dataset_dir / "images" / "val"
     yolo_images_test = yolo_dataset_dir / "images" / "test"
@@ -348,7 +408,7 @@ if __name__ == "__main__":
     yolo_labels_val = yolo_dataset_dir / "labels" / "val"
     yolo_labels_test = yolo_dataset_dir / "labels" / "test"
 
-    results_dir = Path("../results") / args.model_name
+    results_dir = project_root / "results" / args.model_name
     results_vis_dir = results_dir / "vis"
 
     for path in [
@@ -373,7 +433,8 @@ if __name__ == "__main__":
     save_dataset_info(yolo_data, results_dir / "dataset_info.json")
 
     # visualize data
-    visualize_slices(results_vis_dir, num_slices=4)
+    visualize_slices(results_vis_dir, num_slices=4,
+                     images_dir=yolo_images_train, labels_dir=yolo_labels_train)
 
     # train model
     train_pipeline(

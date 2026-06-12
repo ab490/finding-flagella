@@ -1,32 +1,46 @@
 #!/bin/bash
-#SBATCH --job-name=cv                     # Job name
-#SBATCH --output=../logs/cv_train_%j.out  # Path for the standard output file
-#SBATCH --error=../logs/cv_train_%j.err   # Path for the error file
+# Train one or more YOLO models.
+#
+# Usage:
+#   bash bash_scripts/train.sh --data-dir /path/to/data
+#   bash bash_scripts/train.sh --data-dir /path/to/data yolov9e
+#   bash bash_scripts/train.sh --data-dir /path/to/data yolov8n yolov9e
+#
+# /path/to/data must contain:
+#   train/               (tomogram slice directories)
+#   train_labels.csv
 
-#SBATCH --mail-type=ALL                   # Email notification for all states
-#SBATCH --mail-user=anobajaj@iu.edu       # Email address for notifications
-#SBATCH -p gpu
-#SBATCH --gpus-per-node=1
-#SBATCH -A c01560
-#SBATCH --mem=40G
-#SBATCH --time=6:00:00
-#SBATCH --cpus-per-task=4
+set -e
 
+ALL_MODELS=("yolov8n" "yolov8s" "yolov8m" "yolov8l" "yolov8x"
+            "yolov9t" "yolov9s" "yolov9m" "yolov9c" "yolov9e")
 
-# Load required modules
-# module load python/gpu/3.11.5
+DATA_DIR=""
+SELECTED_MODELS=()
 
-# activate venv
-# source /N/scratch/anobajaj/v_envs/cv_env/bin/activate
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --data-dir) DATA_DIR="$2"; shift 2 ;;
+        *) SELECTED_MODELS+=("$1"); shift ;;
+    esac
+done
 
+if [[ -z "$DATA_DIR" ]]; then
+    echo "Error: --data-dir is required"
+    echo "Usage: $0 --data-dir /path/to/data [model_name ...]"
+    exit 1
+fi
 
-# Run the Python script
-# Pass the argument for model_name
-MODEL_NAME=("yolov8n" "yolov8s" "yolov8m" "yolov8l" "yolov8x" "yolov9t" "yolov9s" "yolov9m" "yolov9c" "yolov9e")
+if [[ ${#SELECTED_MODELS[@]} -eq 0 ]]; then
+    SELECTED_MODELS=("${ALL_MODELS[@]}")
+fi
 
-for model_name in "${MODEL_NAME[@]}"; do
-    echo "Running for model_name=$model_name" 
-    python ../py_files/train_model.py "$model_name"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+for model in "${SELECTED_MODELS[@]}"; do
+    echo "=== Training: $model ==="
+    uv run --directory "$PROJECT_ROOT" python py_files/train_model.py "$model" --data-dir "$DATA_DIR"
 done
 
 echo "All models trained!"

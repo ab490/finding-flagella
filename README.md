@@ -3,7 +3,7 @@
 ## Table of Contents
 - [Abstract](#abstract)
 - [Repository Structure](#repository-structure)
-- [Bigred Setup](#bigred-setup)
+- [Quick Start](#quick-start)
 - [Results](#results)
 
 ## Abstract
@@ -12,101 +12,64 @@ Flagellar motors are important nanomachines in bacteria that drive cell motility
 
 ## Repository Structure
 
-| File/Folder       | Description                                                                 |
-|-------------------|-----------------------------------------------------------------------------|
-| `py_files/`       | Contains Python scripts, including the main analysis code for the project.  |
-| `bash_scripts/`   | Contains Bash scripts used for running the Python files on BigRed.          |
-| `README.md`       | Overview of the project, setup instructions, and usage details.             |
-| `imgs/`           | Contains images used in documentation markdowns (not required for the project). |
-| `requirements.txt`| Lists Python dependencies needed to run the project.                        |
-| `.gitignore`      | Specifies untracked files that are to be ignored in the repository.                      |
-
+| File/Folder      | Description                                                                      |
+|------------------|----------------------------------------------------------------------------------|
+| `py_files/`      | Python scripts for training and inference.                                       |
+| `bash_scripts/`  | Portable shell scripts for running training and inference.                       |
+| `imgs/`          | Images used in this README.                                                      |
+| `pyproject.toml` | Project metadata and dependencies (managed with [uv](https://github.com/astral-sh/uv)). |
+| `tests/`         | pytest test suite.                                                               |
+| `.gitignore`     | Specifies untracked files ignored by git.                                        |
 
 #### Files in `py_files/`
 - `train_model.py` – Prepares the dataset and trains the YOLO model on 2D cryo-ET slices.
 - `predict_model.py` – Runs inference on test tomograms and generates 2D overlays and 3D visualizations of predicted motor locations.
 
 #### Files in `bash_scripts/`
-- `train.sh` – Bash script for launching YOLO model training.
-- `predict.sh` – Bash script for running model inference on test data.
-
-**Note:** The model name can be passed as a command-line argument when running these jobs.
+- `train.sh` – Trains one or more YOLO models.
+- `predict.sh` – Runs inference with a trained model.
 
 
-## Bigred Setup
+## Quick Start
 
-- Connect to BigRed
-```python
-ssh username@bigred200.uits.iu.edu
+**Requirements:** [uv](https://docs.astral.sh/uv/getting-started/installation/) — installs Python 3.12 automatically.
+
+```bash
+# 1. Clone and install
+git clone <repo-url>
+cd finding-flagella
+uv sync
+
+# 2. Download the dataset (requires a Kaggle account)
+uv sync --extra download
+uv run kaggle competitions download -c byu-locating-bacterial-flagellar-motors-2025
+unzip byu-locating-bacterial-flagellar-motors-2025.zip -d /path/to/data
+rm byu-locating-bacterial-flagellar-motors-2025.zip
+# /path/to/data must contain:
+#   train/                   one subdirectory per tomogram, each with slice_NNNN.jpg files
+#   train_labels.csv         columns: tomo_id, Number of motors, Motor axis 0/1/2, Array shape (axis 0)
+
+# 3. Train (all models, or name specific ones)
+bash bash_scripts/train.sh --data-dir /path/to/data
+bash bash_scripts/train.sh --data-dir /path/to/data yolov9e
+
+# 4. Run inference
+bash bash_scripts/predict.sh yolov9e
+
+# 5. Run tests
+uv run pytest tests/
 ```
 
-- Clone the Repository
-```python
-cd ~
-git clone git@github.com:ab490/flagella-finder.git
-```
+Results are written to `results/<model_name>/`:
+- `yolo_train/` – model weights, metrics, and Ultralytics outputs
+- `predictions/` – per-slice overlay images, `3d_predictions_test.csv`, and 3D scatter plots
+- `vis/` – annotated sample images from the training set
+- `loss_curve.png` – training vs. validation box loss
 
-- Setup virtual environment (in scratch directory - will get deleted after 30 days but has 100TB limit)
-```python
-cd /N/scratch/username
-mkdir v_envs
-cd v_envs
-
-module load python/gpu/3.11.5
-python -m venv name_of_venv
-source /N/slate/username/v_envs/name_of_venv/bin/activate
-```
-
-- Download dataset in scratch directory
-```python
-cd /N/scratch/username
-kaggle competitions download -c byu-locating-bacterial-flagellar-motors-2025
-unzip byu-locating-bacterial-flagellar-motors-2025.zip -d data
-rm -rf byu-locating-bacterial-flagellar-motors-2025.zip
-```
-
-- Install dependencies
-```python
-cd ~/cv-final-project-flagella/
-pip install -r requirements.txt
-```
-
-- Change the default dataset path in Ultralytics config file
-```python
-vim ~/.config/Ultralytics/settings.json
-
-# set the datasets_dir to this (replace anobajaj with your username)
-"datasets_dir": "/N/u/anobajaj/BigRed200/cv-final-project-flagella/datasets",
-```
-
-- Run the code
-```python
-cd ~/cv-final-project-flagella/bash_scripts
-sbatch train.sh
-sbatch predict.sh
-```
-    
-⚠️ **Warning**!<br>
-    Remember to make 2 changes in the bash script:<br>
-    1. Change the email id to your own<br>
-    2. Change the path to virtual environment to yours<br>
-    (just usernames would have to be changed for both these if rest steps were same)<br><br>
-    And this one change in the python script:<br>
-    Change the username in base_data_path to yours
-
-To do this, run the following code (and replace username in this code to your own)
-```python
-find . -type f -exec sed -i 's/anobajaj/username/g' {} +
-```
-
-- Check logs
-``` python
-cd ~/cv-final-project-flagella/logs/
-```
-
-- Check results
-``` python
-cd ~/cv-final-project-flagella/results/
+You can also invoke the scripts directly (from any working directory):
+```bash
+uv run python py_files/train_model.py yolov9e --data-dir /path/to/data
+uv run python py_files/predict_model.py yolov9e
 ```
 
 ## Results
@@ -190,4 +153,3 @@ Each 3D scatter plot shows YOLOv9e-predicted flagellar motor positions aggregate
 ## License
 
 This project is licensed under the [MIT License](https://opensource.org/licenses/MIT)
-

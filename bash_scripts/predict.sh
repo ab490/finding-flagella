@@ -1,32 +1,21 @@
 #!/bin/bash
-#SBATCH --job-name=cv     # Job name
-#SBATCH --output=../logs/cv_predict_%j.out  # Path for the standard output file
-#SBATCH --error=../logs/cv_predict_%j.err   # Path for the error file
+# Run inference and generate 3D visualizations for a trained model.
+#
+# Usage:
+#   bash bash_scripts/predict.sh yolov9e
 
-#SBATCH --mail-type=ALL                 # Email notification for all states
-#SBATCH --mail-user=anobajaj@iu.edu     # Email address for notifications
-#SBATCH -p gpu-debug
-#SBATCH --gpus-per-node=1
-#SBATCH -A c01560
-#SBATCH --mem=40G
-#SBATCH --time=1:00:00
-#SBATCH --cpus-per-task=4
+set -e
 
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <model_name>"
+    echo "Example: $0 yolov9e"
+    exit 1
+fi
 
-# Load required modules
-# module load python/gpu/3.11.5
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# activate venv
-# source /N/scratch/anobajaj/v_envs/cv_env/bin/activate
-
-
-# Run the Python script
-# pass the argument for model_name
-MODEL_NAME=("yolov9e")
-
-for model_name in "${MODEL_NAME[@]}"; do
-    echo "Running for model_name=$model_name" 
-    python ../py_files/predict_model.py "$model_name"
-done
+echo "=== Predicting with: $1 ==="
+uv run --directory "$PROJECT_ROOT" python py_files/predict_model.py "$1"
 
 echo "Done!"
